@@ -2,7 +2,7 @@
 Copyright (c) 2026 Grzegorz Kociołek
 SPDX-License-Identifier: MIT
 
-This demo is a representation of moving an image with the subpixel precision
+This demo is a presentation of moving an image with the subpixel precision
 by first converting an image from the spatial domain to the spatial frequency domain and
 applying wavefront phase shift, then performing sampling of the continuous wave field using
 inverse discrete fourier transform.
@@ -18,10 +18,13 @@ from dataclasses import dataclass
 
 import lib.helpers as helpers
 import lib.image_processing as image_processing
+import lib.dither as dither
 
 @dataclass
 class AppConfig:
-  framerate: int  
+  framerate: int
+  mouse_sensitivity: float
+  dither_engine: dither.DitherEngine
 
 class App:
   def __init__(self, image: np.ndarray, start_displacement: np.ndarray, config: AppConfig):
@@ -67,6 +70,7 @@ class App:
         match event.type:
           case pygame.MOUSEMOTION:
             d_pos = (np.array(event.pos) - np.array([self.w_width//2, self.w_height//2])).astype(np.float32)
+            d_pos *= self.config.mouse_sensitivity
             self.displacement = d_pos
           case pygame.QUIT:
             self.running = False
@@ -88,6 +92,7 @@ class App:
   def _displace_and_update_image(self):
     self.cur_image_pos += self.displacement
     moved_image = image_processing.move_image_subpixel(self.ref_image, self.cur_image_pos)
+    self.config.dither_engine.apply(moved_image)
     self.image = App._convert_image_for_view(moved_image)
 
   @staticmethod
@@ -117,11 +122,26 @@ def main():
 
   parser.add_argument("input_image", type=str, help="Path to input file")
   parser.add_argument("--framerate", type=int, default=60, help="The framerate of the UI")
+  parser.add_argument("--mouse-sensitivity", type=float, default=1.0, help="The sensitivity of mouse displacement" )
+  parser.add_argument("--dither-amp", type=float, default=0.008, help="The amplitude of dithering")
+  parser.add_argument("--dither-algorithm", default='random', choices=['random', 'selective-random'], help="The dither algorithm to use")
+  parser.add_argument("--dither-block-size", type=int, default=32, help="Size of the dither block (for selective-random)")
 
   args = parser.parse_args()
   input_img = image_processing.load_image(args.input_image)
 
-  app = App(input_img, np.array([0,0]), AppConfig(args.framerate))
+  if args.dither_amp != 0.0:
+    match args.dither_algorithm:
+      case 'random':
+        dither_inst = dither.DitherRandom(args.dither_amp)
+      case 'selective-random':
+        dither_inst = dither.DitherSelectiveRandom(args.dither_amp, args.dither_block_size)
+  else:
+    dither_inst = dither.DitherNone()
+
+  app = App(input_img, np.array([0,0]), AppConfig(framerate=args.framerate,
+                                                  mouse_sensitivity=args.mouse_sensitivity,
+                                                  dither_engine=dither_inst))
   app.loop()
 
 if __name__ == '__main__':
