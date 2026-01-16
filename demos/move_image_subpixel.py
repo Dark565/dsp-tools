@@ -25,6 +25,7 @@ class AppConfig:
   framerate: int
   mouse_sensitivity: float
   dither_engine: dither.DitherEngine
+  oversampling_factor: int|None
 
 class App:
   def __init__(self, image: np.ndarray, start_displacement: np.ndarray, config: AppConfig):
@@ -91,7 +92,14 @@ class App:
 
   def _displace_and_update_image(self):
     self.cur_image_pos += self.displacement
-    moved_image = image_processing.move_image_subpixel(self.ref_image, self.cur_image_pos)
+    if self.config.oversampling_factor is not None:
+      oversampling_res = image_processing.find_oversampling_resolution(self.ref_image.shape[:2],
+                                                                       np.array([self.config.oversampling_factor,
+                                                                                 self.config.oversampling_factor]))
+    else:
+      oversampling_res = None
+
+    moved_image = image_processing.move_image_subpixel(self.ref_image, self.cur_image_pos, oversampling_res)
     self.config.dither_engine.apply(moved_image)
     self.image = App._convert_image_for_view(moved_image)
 
@@ -123,9 +131,11 @@ def main():
   parser.add_argument("input_image", type=str, help="Path to input file")
   parser.add_argument("--framerate", type=int, default=60, help="The framerate of the UI")
   parser.add_argument("--mouse-sensitivity", type=float, default=1.0, help="The sensitivity of mouse displacement" )
-  parser.add_argument("--dither-amp", type=float, default=0.008, help="The amplitude of dithering")
+  parser.add_argument("--dither-amp", type=float, default=0.004, help="The amplitude of dithering")
   parser.add_argument("--dither-algorithm", default='random', choices=['random', 'selective-random'], help="The dither algorithm to use")
   parser.add_argument("--dither-block-size", type=int, default=32, help="Size of the dither block (for selective-random)")
+  parser.add_argument("--no-oversampling", action='store_true', default=False, help="Disable oversampling")
+  parser.add_argument("--oversampling-factor", type=int, default=2, help="The factor of oversampling during processing")
 
   args = parser.parse_args()
   input_img = image_processing.load_image(args.input_image)
@@ -139,9 +149,12 @@ def main():
   else:
     dither_inst = dither.DitherNone()
 
+  oversampling_factor = args.oversampling_factor if not args.no_oversampling else None
+
   app = App(input_img, np.array([0,0]), AppConfig(framerate=args.framerate,
                                                   mouse_sensitivity=args.mouse_sensitivity,
-                                                  dither_engine=dither_inst))
+                                                  dither_engine=dither_inst,
+                                                  oversampling_factor = oversampling_factor))
   app.loop()
 
 if __name__ == '__main__':
