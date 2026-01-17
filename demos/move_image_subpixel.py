@@ -14,6 +14,7 @@ import numpy as np
 import argparse
 import time
 import pygame
+import scipy
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
 
@@ -43,12 +44,15 @@ class ImageTransformMoveFFT(ImageTransformMoveAlgorithm):
     return image_processing.move_image_subpixel_fft(img, self.direction, self.oversampling_res)
 
 class ImageTransformMoveFIR(ImageTransformMoveAlgorithm):
-  def __init__(self, direction: np.array, kernel_size: int):
+  def __init__(self, direction: np.array, kernel_size: int, window_function, move_jitter: float):
     self.direction = direction
     self.kernel_size = kernel_size
+    self.window_function = window_function
+    self.move_jitter = move_jitter
 
   def move(self, img: np.ndarray):
-    return image_processing.move_image_subpixel_fir(img, self.direction, self.kernel_size)
+    return image_processing.move_image_subpixel_fir(img, self.direction, self.kernel_size,
+                                                    self.window_function, self.move_jitter)
 
 @dataclass
 class AppConfig:
@@ -162,6 +166,8 @@ def main():
   parser.add_argument("--mouse-sensitivity", type=float, default=1.0, help="The sensitivity of mouse displacement" )
   parser.add_argument("--interpolation-algorithm", default='fir', choices=['fir', 'fft'])
   parser.add_argument("--kernel-size", type=int, default=8, help="Kernel size for the FIR interpolation")
+  parser.add_argument("--window-function", choices=['hann', 'lanczos', 'none'], default='hann')
+  parser.add_argument("--move_jitter", type=float, default=0.0, help="Jitter of a move vector for each pixel (for FIR)")
   parser.add_argument("--dither-amp", type=float, default=0.004, help="The amplitude of dithering")
   parser.add_argument("--dither-algorithm", default='random', choices=['random', 'selective-random'], help="The dither algorithm to use")
   parser.add_argument("--dither-block-size", type=int, default=32, help="Size of the dither block (for selective-random)")
@@ -182,9 +188,20 @@ def main():
 
   oversampling_factor = args.oversampling_factor if not args.no_oversampling else None
 
+  match args.window_function:
+    case 'hann':
+      window_function = scipy.signal.windows.hann
+    case 'lanczos':
+      window_function = scipy.signal.windows.lanczos
+    case 'none':
+      window_function = lambda shape: np.ones(shape)
+    case _:
+      raise Exception("Invalid window function")
+
   match args.interpolation_algorithm:
     case 'fir':
-      interpolation_alg = ImageTransformMoveFIR(np.array([0,0]), args.kernel_size)
+      interpolation_alg = ImageTransformMoveFIR(np.array([0,0]), args.kernel_size,
+                                                window_function, args.move_jitter)
     case 'fft':
       oversampling_res = image_processing.find_oversampling_resolution(\
           input_img.shape[:2],

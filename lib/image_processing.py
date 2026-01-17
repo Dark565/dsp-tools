@@ -8,19 +8,22 @@ import scipy # for the Tukey window
 
 import lib.helpers as helpers
 
-def move_image_subpixel_fir(img: np.ndarray, move_vector: np.array, kernel_size = 8) -> np.ndarray:
+def move_image_subpixel_fir(img: np.ndarray, move_vector: np.array, kernel_size = 6,
+                            window = scipy.signal.windows.hann,
+                            move_jitter: float = 0.0) -> np.ndarray:
   """
   Move the image's content in the direction of a continuous 2D move_vector (in pixel units) by
   performing a spatial domain convolution with a finite sinc kernel (hanned sinc interpolation).
   """
 
-  hann = scipy.signal.windows.hann(kernel_size)
+  hann = window(kernel_size)
 
   int_move = np.round(move_vector).astype(int)
   frac_move = move_vector - int_move
 
   # We roll the image by the integer part
   img_rolled = np.roll(img, shift=(int_move[0], int_move[1]), axis=(0, 1)) 
+  img_extended = np.pad(img_rolled, ((kernel_size//2, kernel_size//2), (kernel_size//2, kernel_size//2), (0, 0)), mode='wrap')
 
   sinc_kern_y = np.sinc(np.arange(kernel_size) - (kernel_size - 1)/2 + frac_move[0]) * hann
   sinc_kern_x = np.sinc(np.arange(kernel_size) - (kernel_size - 1)/2 + frac_move[1]) * hann
@@ -28,21 +31,14 @@ def move_image_subpixel_fir(img: np.ndarray, move_vector: np.array, kernel_size 
   sinc_kern_y /= np.sum(sinc_kern_y)
   sinc_kern_x /= np.sum(sinc_kern_x)
 
-  img_extended = np.pad(img_rolled, ((kernel_size//2, kernel_size//2), (kernel_size//2, kernel_size//2), (0, 0)), mode='wrap')
-
-  patches_y = np.lib.stride_tricks.sliding_window_view(img_extended, (kernel_size, 1), axis=(0,1))
-
-  # The sinc kernel is separable so we can optimize by splitting to
+  # The sinc kernel is separable so we can optimize by separable to
   # horizontal and vertical convolution
 
-  # TODO: Optimize by using Fused Multiply And Add instead of split multiply and sum
-
-  patches_y = patches_y.transpose(0,1,2,4,3)
-  filtered_y = np.sum(patches_y * sinc_kern_y, axis=(3,4))
+  patches_y = np.lib.stride_tricks.sliding_window_view(img_extended, (kernel_size, 1), axis=(0,1))
+  filtered_y = np.einsum("...jk,j->...", patches_y, sinc_kern_y)
 
   patches_x = np.lib.stride_tricks.sliding_window_view(filtered_y, (1, kernel_size), axis=(0,1))
-
-  filtered_yx = np.sum(patches_x * sinc_kern_x, axis=(3,4))
+  filtered_yx = np.einsum("...jk,k->...", patches_x, sinc_kern_x)
 
   return filtered_yx[:img.shape[0], :img.shape[1]]
 
