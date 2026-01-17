@@ -15,17 +15,47 @@ import argparse
 import time
 import pygame
 from dataclasses import dataclass
+from abc import ABC, abstractmethod
 
 import lib.helpers as helpers
 import lib.image_processing as image_processing
 import lib.dither as dither
+
+class ImageTransformAlgorithm(ABC):
+  @abstractmethod
+  def move(self, img: np.ndarray) -> np.ndarray:
+    pass
+
+class ImageTransformMoveAlgorithm(ImageTransformAlgorithm):
+  def __init__(self, direction: np.array):
+    self.direction = direction
+
+  def set_direction(self, new_dir: np.array):
+    self.direction = new_dir
+
+class ImageTransformMoveFFT(ImageTransformMoveAlgorithm):
+  def __init__(self, direction: np.array, oversampling_res: np.array):
+    super()
+    self.direction = direction
+    self.oversampling_res = oversampling_res
+
+  def move(self, img: np.ndarray):
+    return image_processing.move_image_subpixel_fft(img, self.direction, self.oversampling_res)
+
+class ImageTransformMoveFIR(ImageTransformMoveAlgorithm):
+  def __init__(self, direction: np.array, kernel_size: int):
+    self.direction = direction
+    self.kernel_size = kernel_size
+
+  def move(self, img: np.ndarray):
+    return image_processing.move_image_subpixel_fir(img, self.direction, self.kernel_size)
 
 @dataclass
 class AppConfig:
   framerate: int
   mouse_sensitivity: float
   dither_engine: dither.DitherEngine
-  oversampling_factor: int|None
+  move_alg: ImageTransformMoveAlgorithm
 
 class App:
   def __init__(self, image: np.ndarray, start_displacement: np.ndarray, config: AppConfig):
@@ -92,26 +122,25 @@ class App:
 
   def _displace_and_update_image(self):
     self.cur_image_pos += self.displacement
-    if self.config.oversampling_factor is not None:
-      oversampling_res = image_processing.find_oversampling_resolution(self.ref_image.shape[:2],
-                                                                       np.array([self.config.oversampling_factor,
-                                                                                 self.config.oversampling_factor]))
-    else:
-      oversampling_res = None
 
-    moved_image = image_processing.move_image_subpixel(self.ref_image, self.cur_image_pos, oversampling_res)
-    self.config.dither_engine.apply(moved_image)
-    self.image = App._convert_image_for_view(moved_image)
+    self.config.move_alg.set_direction(self.cur_image_pos)
+    moved_image = self.config.move_alg.move(self.ref_image)
+
+    self.image = App._convert_image_for_view(moved_image, self.config.dither_engine)
 
   @staticmethod
-  def _convert_image_for_view(img: np.ndarray):
-    return np.astype(image_processing.linear_to_srgb(np.clip(img, 0.0, 1.0)) * 255.0, np.uint8)
+  def _convert_image_for_view(img: np.ndarray, dither_engine: dither.DitherEngine):
+
+    srgb_img = image_processing.linear_to_srgb(np.clip(img, 0.0, 1.0))
+    dither_engine.apply(srgb_img) # dithering is applied in sRGB for correcting rounding support
+    return np.astype(np.clip(srgb_img, 0.0, 1.0) * 255.0, np.uint8)
 
   @staticmethod
   def _convert_image_for_proc(img: np.ndarray):
     # pygame expects color axis in the flipped order than what cv2 provides
     img_colors_flipped = np.flip(img, axis=2)
     # Image should be converted to the linear space for correct processing
+
     return image_processing.srgb_to_linear(np.clip(img_colors_flipped, 0, 255).astype(np.float32) / 255.0)
   
   @staticmethod
@@ -131,11 +160,13 @@ def main():
   parser.add_argument("input_image", type=str, help="Path to input file")
   parser.add_argument("--framerate", type=int, default=60, help="The framerate of the UI")
   parser.add_argument("--mouse-sensitivity", type=float, default=1.0, help="The sensitivity of mouse displacement" )
+  parser.add_argument("--interpolation-algorithm", default='fir', choices=['fir', 'fft'])
+  parser.add_argument("--kernel-size", type=int, default=8, help="Kernel size for the FIR interpolation")
   parser.add_argument("--dither-amp", type=float, default=0.004, help="The amplitude of dithering")
   parser.add_argument("--dither-algorithm", default='random', choices=['random', 'selective-random'], help="The dither algorithm to use")
   parser.add_argument("--dither-block-size", type=int, default=32, help="Size of the dither block (for selective-random)")
-  parser.add_argument("--no-oversampling", action='store_true', default=False, help="Disable oversampling")
-  parser.add_argument("--oversampling-factor", type=int, default=2, help="The factor of oversampling during processing")
+  parser.add_argument("--no-oversampling", action='store_true', default=False, help="Disable oversampling (for FFT method)")
+  parser.add_argument("--oversampling-factor", type=int, default=2, help="The factor of oversampling during processing (for FFT method)")
 
   args = parser.parse_args()
   input_img = image_processing.load_image(args.input_image)
@@ -151,10 +182,22 @@ def main():
 
   oversampling_factor = args.oversampling_factor if not args.no_oversampling else None
 
+  match args.interpolation_algorithm:
+    case 'fir':
+      interpolation_alg = ImageTransformMoveFIR(np.array([0,0]), args.kernel_size)
+    case 'fft':
+      oversampling_res = image_processing.find_oversampling_resolution(\
+          input_img.shape[:2],
+          np.array([args.oversampling_factor, args.oversampling_factor]))
+      
+      interpolation_alg = ImageTransformMoveFFT(np.array([0,0]), oversampling_res)
+    case _:
+      raise Exception("Invalid interpolation algorithm")
+
   app = App(input_img, np.array([0,0]), AppConfig(framerate=args.framerate,
                                                   mouse_sensitivity=args.mouse_sensitivity,
                                                   dither_engine=dither_inst,
-                                                  oversampling_factor = oversampling_factor))
+                                                  move_alg=interpolation_alg))
   app.loop()
 
 if __name__ == '__main__':
