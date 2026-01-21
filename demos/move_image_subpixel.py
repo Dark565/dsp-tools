@@ -2,11 +2,8 @@
 Copyright (c) 2026 Grzegorz Kociołek
 SPDX-License-Identifier: MIT
 
-This demo is a presentation of moving an image with the subpixel precision
-by first converting an image from the spatial domain to the spatial frequency domain and
-applying wavefront phase shift, then performing sampling of the continuous wave field using
-inverse discrete fourier transform.
-
+This demo is a presentation of moving an image with the subpixel precision using
+different interpolation methods like FIR or FFT.
 The visible result should be image moving by constant displacement smoothly each frame.
 """
 
