@@ -7,14 +7,70 @@ from dataclasses import dataclass
 import scipy # for the Tukey window
 
 import lib.helpers as helpers
+from lib.trilaterate import trilaterate_2d
+
+def calculate_gdg_2d(img: np.ndarray, kernel_size=6, window = scipy.signal.windows.hann) -> np.ndarray:
+  """
+  Calculate group delay gradient by using triangulation with 3 sinc convolutions.
+  """
+
+  # TODO: Generalize it to any tensor size
+  # TODO: There's an extra row and column calculated which can be removed from calculations
+
+  TRIANGLE_BASE = 0.25 # 0.25 = 90 degree shift
+  TRIANGLE_HEIGHT = 0.2165063509 # base * sqrt(3)/2
+  V_BL  = [-TRIANGLE_BASE/2, TRIANGLE_HEIGHT/3]
+  V_TOP = [0, -TRIANGLE_HEIGHT*2/3]
+  V_BR  = [TRIANGLE_BASE/2, TRIANGLE_HEIGHT/3]
+
+  img_extended = np.pad(img, ((kernel_size//2, kernel_size//2), (kernel_size//2, kernel_size//2), (0, 0)), mode='wrap')
+  window_vec = window(kernel_size)
+
+  kern_range = np.arange(kernel_size) - (kernel_size - 1)/2
+
+  kern_v_y_top    = np.sinc(kern_range + V_TOP[1]) * window_vec
+  kern_v_y_bottom = np.sinc(kern_range + V_BL[1]) * window_vec
+  kern_v_x_left   = np.sinc(kern_range + V_BL[0]) * window_vec
+  kern_v_x_right  = np.sinc(kern_range + V_BR[0]) * window_vec
+
+  patches_y = np.lib.stride_tricks.sliding_window_view(img_extended, (kernel_size, 1), axis=(0,1))
+  filtered_y = np.einsum("...jk,ij->i...", patches_y, [kern_v_y_top, kern_v_y_bottom])
+  energy_y_sq = np.einsum("...jk,...jk->...", patches_y, patches_y)
+
+  patches_yx_for_bottom_y  = np.lib.stride_tricks.sliding_window_view(filtered_y[1], (1, kernel_size), axis=(0,1))
+  filtered_yx_for_bottom_y = np.einsum("...jk,ik->i...", patches_yx_for_bottom_y, [kern_v_x_left, kern_v_x_right])
+
+  patches_yx_for_bottom_y_energy = np.lib.stride_tricks.sliding_window_view(energy_y_sq, (1, kernel_size), axis=(0,1))
+  energy_yx_sq = np.einsum("...jk->...", patches_yx_for_bottom_y_energy)
+
+  energy_yx = np.sqrt(energy_yx_sq)
+
+  # Now we trilaterate to find vectors of group delay gradient
+
+  filtered_y_top_centered = filtered_y[0,...,:,(kernel_size-1)//2:-kernel_size//2,:]
+
+  tr_value_tensor = np.stack((filtered_y_top_centered, filtered_yx_for_bottom_y[0], filtered_yx_for_bottom_y[1]), axis=0)
+  tr_value_tensor = 1.0 - tr_value_tensor / helpers.add_epsilon(energy_yx)
+  tr_value_tensor = tr_value_tensor[..., np.newaxis]
+
+  tr_vertex_tensor = np.broadcast_to(np.array([V_TOP, V_BL, V_BR])[np.newaxis, np.newaxis, ...], (*tr_value_tensor[0].shape[:-1], 3, 2))
+
+  gradients = trilaterate_2d(vertices=(tr_vertex_tensor[..., 0, :], tr_vertex_tensor[..., 1, :], tr_vertex_tensor[..., 2, :]),
+                             values=(tr_value_tensor[0], tr_value_tensor[1], tr_value_tensor[2]))
+
+  return gradients[:img.shape[0], :img.shape[1]]
+
+
 
 def move_image_subpixel_fir(img: np.ndarray, move_vector: np.array, kernel_size = 6,
                             window = scipy.signal.windows.hann,
                             move_jitter: float = 0.0) -> np.ndarray:
   """
   Move the image's content in the direction of a continuous 2D move_vector (in pixel units) by
-  performing a spatial domain convolution with a finite sinc kernel (hanned sinc interpolation).
+  performing a spatial domain convolution with a finite sinc kernel (sinc interpolation).
   """
+
+  # TODO: There's an additional row and column calculated which can be removed from calculations
 
   hann = window(kernel_size)
 
