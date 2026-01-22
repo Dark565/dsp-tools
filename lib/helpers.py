@@ -47,3 +47,51 @@ def alpha_blend(background: np.ndarray, foreground: np.ndarray) -> np.ndarray:
   alpha_broadcast = np.broadcast_to(foreground[..., -1][..., np.newaxis], background.shape)
   blend_img = foreground[..., :-1] * alpha_broadcast + (1.0 - alpha_broadcast) * background
   return blend_img
+
+def get_orthonormal_vectors_3d(vec: np.ndarray, normalized = True) -> tuple[np.ndarray, np.ndarray]:
+  """
+  Use the Frisvad formula for efficient orthonormal vectors obtaining.
+  """
+  if vec.shape[-1] != 3:
+    raise Exception("The passed array must be of shape (..., 3)")
+
+  if not normalized:
+    vec = vec / np.linalg.norm(vec, axis=-1, keepdims=True)
+
+  x = vec[..., 0]
+  y = vec[..., 1]
+  z = vec[..., 2]
+
+  sign = np.copysign(1, z)
+  a = -1/(sign + z)
+  b = x * y * a
+  
+  u = np.array([1 + sign * x*x * a, sign * b, -sign * x]).swapaxes(0, -1)
+  v = np.array([b, sign + y*y * a, -y]).swapaxes(0, -1)
+
+  return (u, v)
+
+def get_orthonormal_vector_3d_starting_on_vec(normal: np.ndarray, vec: np.ndarray, normalized=True) -> tuple[np.ndarray, np.ndarray]:
+  if normal.shape[-1] != 3:
+    raise Exception("The passed normal vector array must be of shape (..., 3)")
+  
+  if vec.shape[-1] != 3:
+    raise Exception("The passed starting vec must be of shape (..., 3)")
+
+  if not normalized:
+    normal = normal / np.linalg.norm(normal, axis=-1, keepdims=True)
+
+  # dot product on last axis
+  vec_on_norm = np.einsum("...i,...i->...", normal, vec)
+
+  u = vec - vec_on_norm * normal
+  u /= np.linalg.norm(u, axis=-1, keepdims=True)
+
+  v = np.cross(normal, u, axis=-1)
+
+  return (u, v)
+
+
+def distance_to_face(vec: np.ndarray, prism: np.ndarray) -> np.ndarray:
+  dist_v = prism / add_epsilon_move_sign(vec)
+  return np.min(dist_v, axis=-1)

@@ -13,6 +13,7 @@ import scipy
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from abc import ABC, abstractmethod
 
 from dataclasses import dataclass
 from typing import Callable
@@ -20,7 +21,7 @@ from typing import Callable
 import lib.helpers as helpers
 import lib.image_processing as image_processing
 
-def get_vector_field_image(
+def get_quiver_vector_field_image(
     arr: np.array,
     color='teal',
     dpi=100
@@ -59,8 +60,91 @@ def get_vector_field_image(
     rgba_buffer = np.pad(rgba_buffer, pad_width)
 
     plt.close(fig)
-    return rgba_buffer
+    return image_processing.srgb_to_linear(rgba_buffer / 255.0).astype(np.uint8)
 
+def get_color_plane_image(
+    vec_field: np.ndarray,
+    normal: np.array,
+    start_vec: np.array
+) -> np.ndarray:
+  
+  # TODO: Fix color scaling for certain normals
+
+  if len(vec_field.shape) < 4 or vec_field.shape[-2:] != (3, 2):
+    raise Exception("Vector field is expected to be of shape (H, W, 3, 2)")
+
+  u,v = helpers.get_orthonormal_vector_3d_starting_on_vec(normal, start_vec, True)
+  bt709_weights = np.array([0.2126, 0.7152, 0.0722])
+
+  # We calculate the center of rotation
+  color_box = np.ones(u.shape, dtype=u.dtype)
+  u_box_fit = helpers.distance_to_face(u, color_box)
+  v_box_fit = helpers.distance_to_face(v, color_box)
+
+  # This should have shape (1,)
+  max_fit_amplitude = np.min((u_box_fit, v_box_fit), axis=-1) / 2
+
+  gray_vf = np.einsum("...ij,i->...j", vec_field, bt709_weights)
+  magnitudes = np.linalg.norm(gray_vf, axis=-1)
+  norms = gray_vf / magnitudes[..., np.newaxis]
+
+  # This should have shape (H, W, 3)
+  color_vecs = (norms[..., 0, np.newaxis] * u[np.newaxis,np.newaxis] \
+                + norms[..., 1, np.newaxis] * v[np.newaxis,np.newaxis]) \
+                  * magnitudes[..., np.newaxis] * max_fit_amplitude
+
+  return color_vecs + [0.5, 0.5, 0.5]
+
+
+class VectorFieldVisualizationStrategy(ABC):
+  @abstractmethod
+  def get_visualization_array(self, img: np.ndarray) -> np.ndarray:
+    """
+    Takes the vector field array of shape (H, W, 3, 2) and returns
+    visualization in shape (H, W, 4). An additional channel for alpha.
+
+    The input and output are in the linear color space.
+    """
+    pass
+
+class VectorFieldVisualizationQuivers(VectorFieldVisualizationStrategy):
+  def __init__(self, color: str, dpi: int):
+    super()
+    self.color = color
+    self.dpi = dpi
+
+  def get_visualization_array(self, img):
+    quiver_image = get_quiver_vector_field_image(img, self.color, self.dpi)
+
+    # TODO: Workaround, alpha should be set in get_quiver_vector_field_image
+    res_img = np.concatenate((quiver_image,
+                              np.full(shape=(*quiver_image.shape[:-1], 1),
+                                      fill_value=0.5, dtype=quiver_image.dtype)), 
+                              axis=-1)
+    
+    return np.flip(res_img, axis=2) # Flip for compliance with the pygame order
+
+
+class VectorFieldVisualizationColorPlane(VectorFieldVisualizationStrategy):
+  """
+  This strategy treats the vector angle as the angle on a color plane and
+  the vector magnitude as the color intensity.
+  """
+  def __init__(self, color_normal: np.array, starting_color: np.array, alpha: float):
+    super()
+    self.color_normal = color_normal / np.linalg.norm(color_normal, axis=-1, keepdims=True)
+    self.starting_color = starting_color
+    self.alpha = alpha
+
+  def get_visualization_array(self, img):
+    vis_img = get_color_plane_image(img, self.color_normal, self.starting_color)
+
+    res_img = np.concatenate((vis_img,
+                              np.full(shape=(*vis_img.shape[:-1], 1),
+                                      fill_value=self.alpha, dtype=vis_img.dtype)), 
+                              axis=-1)
+    
+    return res_img
 
 @dataclass
 class AppConfig:
@@ -68,6 +152,8 @@ class AppConfig:
   mouse_sensitivity: float
   kernel_size: int
   window_function: Callable
+  visualization_strategy: VectorFieldVisualizationStrategy
+  
 
 class App:
   def __init__(self, image: np.ndarray, start_displacement: np.ndarray, config: AppConfig):
@@ -103,8 +189,6 @@ class App:
   def loop(self):
     self.running = True
 
-    pygame.event.set_grab(True)
-
     self.need_update = True
 
     while self.running:
@@ -131,18 +215,11 @@ class App:
       self.config.kernel_size,
       self.config.window_function)
 
-    # in <0,255> sRGB
-    vector_field_img = get_vector_field_image(gradient_vector_array)
-    vector_field_img_proc = App._convert_image_for_proc(vector_field_img[...,:-1])
+    # TODO: Check if axis rotation is not required for some visualization strategies
+    # in <0,1> linear
+    vector_field_img = self.config.visualization_strategy.get_visualization_array(gradient_vector_array)
 
-    # TODO: Workaround, alpha should be set in get_vector_field_image
-    vector_field_img_proc = np.concatenate((vector_field_img_proc,
-                                            np.full(shape=(*vector_field_img_proc.shape[:-1], 1),
-                                                    fill_value=0.6, dtype=vector_field_img_proc.dtype)), 
-                                            axis=-1)
-    
-    image_blend = helpers.alpha_blend(self.ref_image, vector_field_img_proc)
-
+    image_blend = helpers.alpha_blend(self.ref_image, vector_field_img)
     self.image = App._convert_image_for_view(image_blend)
 
   @staticmethod
@@ -178,6 +255,12 @@ def main():
   parser.add_argument("--mouse-sensitivity", type=float, default=1.0, help="The sensitivity of mouse displacement" )
   parser.add_argument("--kernel-size", type=int, default=8, help="Kernel size for convolution")
   parser.add_argument("--window-function", choices=['hann', 'lanczos', 'none'], default='hann')
+  parser.add_argument("--visualization-method", choices=['quivers', 'colorplane'], default='colorplane', help="The visualization method for gradient vectors")
+  parser.add_argument("--dpi", type=int, default=100, help="DPI setting for certain visualization methods")
+  parser.add_argument("--quiver-color", type=str, default='cyan')
+  parser.add_argument("--color-normal", type=str, default="#ff0000", help="The rotation axis color for the colorplane visualization")
+  parser.add_argument("--color-start", type=str, default="#0000ff", help="Start color for the colorplane visualization")
+
 
   args = parser.parse_args()
   input_img = image_processing.load_image(args.input_image)
@@ -192,10 +275,25 @@ def main():
     case _:
       raise Exception("Invalid window function")
 
+  color_normal = np.array(matplotlib.colors.to_rgb(args.color_normal))
+  color_start  = np.array(matplotlib.colors.to_rgb(args.color_start))
+
+  match args.visualization_method:
+    case 'quivers':
+      # TODO: This color should probably be parsed by colors.to_rgb too
+      vis_method = VectorFieldVisualizationQuivers(args.quiver_color, args.dpi)
+    case 'colorplane':
+      # XXX: Alpha is currently hardcoded to 0.5. It should probably be selectable as a
+      #      command line argument
+      vis_method = VectorFieldVisualizationColorPlane(color_normal, color_start, 1.0)
+    case _:
+      raise Exception("Invalid visualization method selected")
+
   app = App(input_img, np.array([0,0]), AppConfig(framerate=args.framerate,
                                                   mouse_sensitivity=args.mouse_sensitivity,
                                                   kernel_size=args.kernel_size,
-                                                  window_function=window_function))
+                                                  window_function=window_function,
+                                                  visualization_strategy=vis_method))
   app.loop()
 
 if __name__ == '__main__':
